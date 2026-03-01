@@ -165,10 +165,10 @@ This repo includes implementations of TRIM-KV, along with a set of baselines and
 
 | Base Model                    | TRIM-KV Checkpoints                           | Training Datasets        | Training Context Len | Training $M$ |
 |------------------------------|-----------------------------------------------|--------------------------|-------------------------|--------------|
-| Qwen3-1.7B                     | [TRIM-KV-Qwen3-1.7B-Math](https://huggingface.co/ngocbh/TrimKV-Qwen3-1.7B-Math)            | OpenR1-Math-220k          | 16K   | 256     |
-| Qwen3-4B                     | [TRIM-KV-Qwen3-4B-Math](https://huggingface.co/ngocbh/TrimKV-Qwen3-4B-Math)            | OpenR1-Math-220k          | 16K   | 256     |
-| Qwen3-8B                     | [TRIM-KV-Qwen3-8B-Math](https://huggingface.co/ngocbh/TrimKV-Qwen3-8B-Math)            |  OpenR1-Math-220k          | 16K   | 256     |
-| Qwen3-14B                    | [TRIM-KV-Qwen3-14B-Math](https://huggingface.co/ngocbh/TrimKV-Qwen3-14B-Math)           |  OpenR1-Math-220k         | 16K   | 256     |
+| Qwen3-1.7B                     | [TRIM-KV-Qwen3-1.7B-Math](https://huggingface.co/ngocbh/TrimKV-Qwen3-1.7B-Math)            | OpenR1-Math-220k          | 32K   | 256     |
+| Qwen3-4B                     | [TRIM-KV-Qwen3-4B-Math](https://huggingface.co/ngocbh/TrimKV-Qwen3-4B-Math)            | OpenR1-Math-220k          | 32K   | 256     |
+| Qwen3-8B                     | [TRIM-KV-Qwen3-8B-Math](https://huggingface.co/ngocbh/TrimKV-Qwen3-8B-Math)            |  OpenR1-Math-220k          | 32K   | 256     |
+| Qwen3-14B                    | [TRIM-KV-Qwen3-14B-Math](https://huggingface.co/ngocbh/TrimKV-Qwen3-14B-Math)           |  OpenR1-Math-220k         | 32K   | 256     |
 | Qwen3-4B-Instruct-2507 | [TrimKV-Qwen3-4B-Instruct-2507](https://huggingface.co/ngocbh/TrimKV-Qwen3-4B-Instruct-2507) | Synth-Long, BookSum, Buddhi      |  128K      | 1024     |
 | Phi-3-mini-128k-instruct | [TrimKV-Phi-3-mini-128k-instruct](https://huggingface.co/ngocbh/TrimKV-Phi-3-mini-128k-instruct) | LongAlpaca          |  128K  | 512 |
 | DeepSeek-R1-Distill-Llama-8B                    | [TrimKV-DeepSeek-R1-Distill-Llama-8B](https://huggingface.co/ngocbh/TrimKV-DeepSeek-R1-Distill-Llama-8B)           |  OpenR1-Math-220k         | 32K   | 256     |
