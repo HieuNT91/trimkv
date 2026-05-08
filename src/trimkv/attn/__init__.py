@@ -3,10 +3,14 @@ import torch
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from . import eager_attn
-from . import flash_attn
+from . import flex_attn
+from . import db_flash_attn
 
 TRIMKV_ATTENTION_IMPLEMENTATIONS = {
-    "db_attn_flash": flash_attn.dynamic_kv_budget_attention_forward, # Dynamic-KV-Budget Attention implementation using Flash Attention
+    "rg_attn_eager": eager_attn.retention_gated_attention_forward, # Retention-Gated Attention implementation using Eager Attention
+    "rg_attn_flex": flex_attn.retention_gated_attention_forward, # Retention-Gated Attention implementation using Flex Attention
+    "db_flash_attention_2": db_flash_attn.dynamic_kv_budget_attention_forward, # Dynamic-KV-Budget Attention implementation using Flash Attention
+    "paged_flash_attention_2": db_flash_attn.paged_flash_attention_forward, # Paged Flash Attention implementation using Flash Attention
     "attn_eager": eager_attn.eager_attention_forward, # Standard Attention implementation using Eager Attention
 }
 

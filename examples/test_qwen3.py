@@ -1,6 +1,6 @@
 import torch
 from trimkv.models.qwen3 import TrimKVQwen3ForCausalLM
-from trimkv.cache_utils import TrimKVCache
+from trimkv.cache_utils import TrimKVCache, PagedTrimKVCache
 from transformers import AutoTokenizer
 
 # model_path = "ngocjr7/trimkv_models/trimkv_qwen3_4b_openr1_math_512m:v0"
@@ -18,9 +18,6 @@ model = TrimKVQwen3ForCausalLM.from_pretrained(
     device_map="cuda",
 )
 model.config._attn_implementation = 'flash_attention_2'
-model.config.compress_memory = True
-model.config.memory_size = 256
-model.config.buffer_size = 32
 
 tokenizer = AutoTokenizer.from_pretrained(
     model.config.base_model, use_fast=True, padding_side="left"
@@ -39,11 +36,26 @@ text = tokenizer.apply_chat_template(
     enable_thinking=True # Switches between thinking and non-thinking modes. Default is True.
 )
 model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-past_key_values = TrimKVCache(device='cuda')
+# past_key_values = TrimKVCache(
+#     memory_size=128,
+#     buffer_size=32,
+#     device='cuda'
+# )
+past_key_values = PagedTrimKVCache(
+    num_layers=model.config.num_hidden_layers,
+    num_heads=model.config.num_key_value_heads,
+    max_seq_len=32768,
+    min_tokens_per_head=0,
+    strategy='fixed_budget',
+    memory_size=128,
+    num_blocks_ratio=1.0, # 0.02 means 2% of the total sequence length, which is 128 for 4k context length
+    buffer_size=32,
+    device='cuda'
+)
 
 generated_ids = model.generate(
     **model_inputs,
-    max_new_tokens=32768,
+    max_new_tokens=2048,
     past_key_values=past_key_values,
 )
 output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist() 

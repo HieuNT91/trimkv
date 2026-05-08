@@ -16,15 +16,12 @@ class TrimKVQwen3Config(Qwen3Config):
         retention_gate='rg',
         base_loss='fwkl',
         attn_impl='rg_attn_flex',
-        compress_memory=True,
-        compress_strategy='alpha',
-        floor_budget_ratio=0.,
-        alpha_threshold=0.0,
-        buffer_size=128,
         trainable_params=None,
         max_seq_len=131072,
         retention_gate_intermediate_size=512,
         logit_block_size=-1,
+        global_capacity=True,
+        tie_retention_gate_layers=True,
         **kwargs,
     ):
         self.retention_gate_bias_init = retention_gate_bias_init
@@ -35,13 +32,10 @@ class TrimKVQwen3Config(Qwen3Config):
         self.attn_impl = attn_impl
         self.base_loss = base_loss
         self.trainable_params = trainable_params
-        self.compress_memory = compress_memory
-        self.compress_strategy = compress_strategy
-        self.floor_budget_ratio = floor_budget_ratio
-        self.alpha_threshold = alpha_threshold
-        self.buffer_size = buffer_size # run compression every `buffer_size` tokens
         self.max_seq_len = max_seq_len
         self.logit_block_size = logit_block_size
+        self.global_capacity = global_capacity
+        self.tie_retention_gate_layers = tie_retention_gate_layers
         super().__init__(
             **kwargs,
         )

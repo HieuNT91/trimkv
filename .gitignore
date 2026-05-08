@@ -1,5 +1,6 @@
 outputs/
 wandb/
+backup/
 spoctmp/
 playground/
 logs/
@@ -8,10 +9,12 @@ results_old/
 artifacts/
 data/
 tests/
+scripts/
 .vscode/
 launch.json
 *wrapper*.sh
 .DS_Store
+.claude/
 
 .vscode/
 

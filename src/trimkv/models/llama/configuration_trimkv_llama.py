@@ -31,15 +31,11 @@ class TrimKVLlamaConfig(LlamaConfig):
         retention_gate='rg',
         base_loss='fwkl',
         attn_impl='rg_attn_flex',
-        compress_memory=True,
-        compress_strategy='alpha',
-        floor_budget_ratio=0.,
-        buffer_size=1,
         trainable_params=None,
         max_seq_len=20480,
         retention_gate_intermediate_size=512,
-        rg_dropout=0.1,
-        skip_layers=0,
+        tie_retention_gate_layers=True,
+        global_capacity=True,
         **kwargs,
     ):
         self.retention_gate_bias_init = retention_gate_bias_init
@@ -50,13 +46,9 @@ class TrimKVLlamaConfig(LlamaConfig):
         self.attn_impl = attn_impl
         self.base_loss = base_loss
         self.trainable_params = trainable_params
-        self.compress_memory = compress_memory
-        self.compress_strategy = compress_strategy
-        self.floor_budget_ratio = floor_budget_ratio
-        self.buffer_size = buffer_size # run compression every `buffer_size` tokens
         self.max_seq_len = max_seq_len
-        self.skip_layers = skip_layers
-        self.rg_dropout = rg_dropout
+        self.tie_retention_gate_layers = tie_retention_gate_layers
+        self.global_capacity = global_capacity
 
         super().__init__(
             **kwargs,

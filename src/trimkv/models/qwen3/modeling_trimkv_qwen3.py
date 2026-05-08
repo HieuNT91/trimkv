@@ -31,17 +31,11 @@ from transformers.models.qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .configuration_trimkv_qwen3 import TrimKVQwen3Config
 
 from trimkv.attn import get_attention_interface 
-from trimkv.cache_utils import TrimKVCache
+from trimkv.triton import retention_sum_triton, retention_sum_packed_triton
+from trimkv.cache_utils import TrimKVCache, DynamicBudgetTrimKVCache, PagedTrimKVCache
 
 
 logger = logging.get_logger(__name__)
-
-
-def check_finite(name, tensor):
-    if not torch.isfinite(tensor).all():
-        print(f"[NaN/Inf detected in {name}]")
-        return False
-    return True
 
 
 class TrimKVBaseModelOutputWithPast(BaseModelOutputWithPast):
@@ -84,7 +78,7 @@ class TrimKVCausalLMOutputWithPast(CausalLMOutputWithPast):
         self.base_loss = base_loss
         self.retention_weights = retention_weights
         self.summarized_retention_weights = summarized_retention_weights
-    
+
 
 class Qwen3RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -179,22 +173,15 @@ class RetentionGate(nn.Module):
         return out
 
 
-class RetentionGate2(nn.Module):
-    """
-    Projects each attention-head vector (head_dim) to a single scalar,
-    using a separate learnable linear layer per head.
-
-    Input shape : (batch_size, seq_len, input_dim)
-    Output shape: (batch_size, seq_len, num_heads)
-    """
+class RetentionGate10(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.hidden_size = self.head_dim * config.num_key_value_heads * 2
+        self.hidden_size = config.hidden_size
         self.retention_gate_intermediate_size = config.retention_gate_intermediate_size
         self.linear1 = nn.Linear(self.hidden_size, self.retention_gate_intermediate_size, bias=True)
-        self.linear2 = nn.Linear(self.retention_gate_intermediate_size, config.num_key_value_heads, bias=False)
+        self.linear2 = nn.Linear(self.retention_gate_intermediate_size, self.retention_gate_intermediate_size, bias=True)
+        self.linear3 = nn.Linear(self.retention_gate_intermediate_size, config.num_key_value_heads, bias=False)
         self.bias = nn.Parameter(torch.zeros(config.num_key_value_heads))
 
         self.act_fn = ACT2FN[config.hidden_act]
@@ -208,59 +195,19 @@ class RetentionGate2(nn.Module):
         self.linear2.weight.data.normal_(mean=0.0, std=initializer_range)
         if self.linear2.bias is not None:
             self.linear2.bias.data.zero_()
+        self.linear3.weight.data.normal_(mean=0.0, std=initializer_range)
+        if self.linear3.bias is not None:
+            self.linear3.bias.data.zero_()
         if self.bias is not None:
             self.bias.data.fill_(self.config.retention_gate_bias_init)
 
-    def forward(self, x: torch.Tensor, transpose=True) -> torch.Tensor:
-        # x: (B, H, S, D)
-        out = x.transpose(1, 2) if transpose else x
-        out = out.reshape(out.shape[0], out.shape[1], -1)  # (B, S, H*D)
-        out = self.linear1(out)  # (B, S, D) -> (B, S, H')
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, S, D)
+        out = self.linear1(x)  # (B, S, D) -> (B, S, H')
         out = self.act_fn(out)  # (B, S, H')
         out = self.linear2(out)  # (B, S, H') -> (B, S, H)
-        out = out + self.bias  # (B, S, H)
-        # avoid sigmoid here to prevent numerical issues
-        out = F.logsigmoid(out)  # (B, S, H)
-        return out
-
-
-class RetentionGate3(nn.Module):
-    """
-    Projects each attention-head vector (head_dim) to a single scalar,
-    using a separate learnable linear layer per head.
-
-    Input shape : (batch_size, seq_len, input_dim)
-    Output shape: (batch_size, seq_len, num_heads)
-    """
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.hidden_size = self.head_dim * config.num_key_value_heads * 2
-        self.retention_gate_intermediate_size = config.retention_gate_intermediate_size
-
-        self.gate_proj = nn.Linear(self.hidden_size, self.retention_gate_intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.retention_gate_intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.retention_gate_intermediate_size, config.num_key_value_heads, bias=False)
-        self.bias = nn.Parameter(torch.zeros(config.num_key_value_heads))
-
-        self.act_fn = ACT2FN[config.hidden_act]
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        initializer_range = getattr(self.config, "initializer_range", 0.02)
-        self.gate_proj.weight.data.normal_(mean=0.0, std=initializer_range)
-        self.up_proj.weight.data.normal_(mean=0.0, std=initializer_range)
-        self.down_proj.weight.data.normal_(mean=0.0, std=initializer_range)
-
-        if self.bias is not None:
-            self.bias.data.fill_(self.config.retention_gate_bias_init)
-
-    def forward(self, x: torch.Tensor, transpose=True) -> torch.Tensor:
-        # x: (B, H, S, D) ->   # (B, S, H, D)
-        out = x.transpose(1, 2) if transpose else x
-        out = out.reshape(out.shape[0], out.shape[1], -1)  # (B, S, H*D)
-        out = self.down_proj(self.act_fn(self.gate_proj(out)) * self.up_proj(out))
+        out = self.act_fn(out)  # (B, S, H')
+        out = self.linear3(out)  # (B, S, H') -> (B, S, H)
         out = out + self.bias  # (B, S, H)
         # avoid sigmoid here to prevent numerical issues
         out = F.logsigmoid(out)  # (B, S, H)
@@ -291,12 +238,12 @@ class TrimKVQwen3Attention(nn.Module):
 
         if config.retention_gate == 'rg':
             self.retention_gate = RetentionGate(config)
-        elif config.retention_gate == 'rg2':
-            self.retention_gate = RetentionGate2(config)
-        elif config.retention_gate == 'rg3':
-            self.retention_gate = RetentionGate3(config)
-        else:
+        elif config.retention_gate == 'rg10':
+            self.retention_gate = RetentionGate10(config)
+        elif config.retention_gate is None:
             self.retention_gate = None
+        else:
+            raise ValueError(f"Unsupported retention gate type: {config.retention_gate}")
 
         self.o_proj = nn.Linear(
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
@@ -329,7 +276,7 @@ class TrimKVQwen3Attention(nn.Module):
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
         value_states = self.v_proj(hidden_states).view(hidden_shape)
 
-        if self.config.retention_gate == 'rg':
+        if self.config.retention_gate in ['rg', 'rg7', 'rg10']:
             retention_weights = self.retention_gate(hidden_states).transpose(1, 2)
         else:
             retention_weights = None
@@ -341,16 +288,24 @@ class TrimKVQwen3Attention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if self.config.retention_gate in ['rg2', 'rg3']:
+        if self.config.retention_gate in ['rg2', 'rg3', 'rg4', 'rg5', 'rg6', 'rg9']:
             kv_states = torch.cat([key_states, value_states], dim=-1)  # (B, H, S, 2*D)
             retention_weights = self.retention_gate(kv_states).transpose(1, 2)
+        elif self.config.retention_gate in ['rg8']:
+            retention_weights = self.retention_gate(key_states, value_states).transpose(1, 2)
 
-        offset = past_key_values.get_seq_length(self.layer_idx) if past_key_values is not None else 0
+        offset = past_key_values.get_seq_length() if past_key_values is not None else 0
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position, "attention_mask": attention_mask}
-            key_states, value_states, retention_weights, kv_positions, flash_attn_kwargs = past_key_values.update(key_states, value_states, retention_weights, cache_position, self.layer_idx, cache_kwargs)
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+                "attention_mask": attention_mask,
+                "retention_weights": retention_weights,
+            }
+            key_states, value_states, retention_weights, kv_positions, flash_attn_kwargs = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
         else:
             kv_positions = None
 
@@ -359,6 +314,13 @@ class TrimKVQwen3Attention(nn.Module):
             assert attn_impl in ["rg_attn_flex"], f"Unsupported attention implementation during training: {attn_impl}"
         else:
             attn_impl = self.config._attn_implementation
+
+        if isinstance(past_key_values, DynamicBudgetTrimKVCache):
+            # use dynamic budget trimkv attention
+            attn_impl = "db_" + attn_impl
+        elif isinstance(past_key_values, PagedTrimKVCache):
+            # use paged trimkv attention
+            attn_impl = "paged_" + attn_impl
 
         attention_interface: Callable = get_attention_interface(attn_impl)
 
@@ -488,24 +450,12 @@ class TrimKVQwen3PreTrainedModel(PreTrainedModel):
     _supports_attention_backend = True
 
     def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, RetentionGate):
-            if module.bias is not None:
-                module.bias.data.fill_(self.config.retention_gate_bias_init)
-        elif isinstance(module, RetentionGate2):
-            if module.bias is not None:
-                module.bias.data.fill_(self.config.retention_gate_bias_init)
-        elif isinstance(module, RetentionGate3):
-            if module.bias is not None:
-                module.bias.data.fill_(self.config.retention_gate_bias_init)
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+        if isinstance(module, RetentionGate):
+            module.reset_parameters()
+        elif isinstance(module, RetentionGate10):
+            module.reset_parameters()
+        else:
+            super()._init_weights(module)
 
     @classmethod
     def from_pretrained(
@@ -549,7 +499,7 @@ class TrimKVQwen3PreTrainedModel(PreTrainedModel):
                 config.base_model = pretrained_model_name_or_path
 
             for key in list(kwargs.keys()):
-                if hasattr(config, key) and key != "torch_dtype":
+                if hasattr(config, key) and key != "torch_dtype" and key != "dtype":
                     setattr(config, key, kwargs.pop(key))
             model = super().from_pretrained(base_model, config=config, *model_args, **kwargs)
 
@@ -603,6 +553,26 @@ class TrimKVQwen3Model(TrimKVQwen3PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+        if config.retention_gate in ['rg10'] and config.tie_retention_gate_layers:
+            self._tie_retention_gate_layers()
+
+    def _tie_retention_gate_layers(self):
+        # tie bias as well
+        shared_linear3 = None
+        shared_bias = None
+        for layer in self.layers:
+            if shared_linear3 is None:
+                # shared_linear2 = layer.self_attn.retention_gate.linear2
+                shared_linear3 = layer.self_attn.retention_gate.linear3
+            else:
+                # layer.self_attn.retention_gate.linear2 = shared_linear2
+                layer.self_attn.retention_gate.linear3 = shared_linear3
+
+            if shared_bias is None:
+                shared_bias = layer.self_attn.retention_gate.bias
+            else:
+                layer.self_attn.retention_gate.bias = shared_bias
+
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -646,10 +616,7 @@ class TrimKVQwen3Model(TrimKVQwen3PreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = TrimKVCache(
-                max_seq_len=self.config.max_seq_len,
-                device=inputs_embeds.device,
-            )
+            raise ValueError("`use_cache=True` requires `past_key_values` to be provided, but `past_key_values` is `None`. Please initialize TrimKVCache yourself and pass it in.")
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -748,16 +715,8 @@ class TrimKVQwen3Model(TrimKVQwen3PreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        if past_key_values is not None and self.config.compress_memory:
-            past_key_values.compress(
-                strategy=self.config.compress_strategy,
-                memory_size=self.config.memory_size,
-                buffer_size=self.config.buffer_size,
-                floor_budget_ratio=self.config.floor_budget_ratio,
-                alpha_threshold=self.config.alpha_threshold,
-                num_layers=self.config.num_hidden_layers,
-                num_key_value_heads=self.config.num_key_value_heads,
-            )
+        if past_key_values is not None and isinstance(past_key_values, TrimKVCache):
+            past_key_values.compress()
 
         return TrimKVBaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -800,6 +759,129 @@ class TrimKVQwen3ForCausalLM(TrimKVQwen3PreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
+    def compute_retention_loss(self, retention_weights, summarized_retention_weights, position_ids=None):
+        bz, num_layers, num_key_value_heads, seqlen = retention_weights.shape
+        if position_ids is not None:
+            first_dummy_value = position_ids[:, :1] - 1  # We just need the diff on this first value to be 1
+            position_diff = torch.diff(position_ids, prepend=first_dummy_value, dim=-1)
+            doc_mask = (position_diff != 1).cumsum(-1)
+
+            lens_per_seg = torch.zeros_like(position_ids).scatter_reduce(
+                1, doc_mask, position_ids + 1, reduce="amax", include_self=False
+            )
+            seqlen = lens_per_seg.gather(1, doc_mask)
+        else:
+            doc_mask = None
+            seqlen = torch.full((bz, seqlen), seqlen, device=retention_weights.device, dtype=torch.long)
+            position_ids = torch.arange(
+                seqlen.max(), device=retention_weights.device
+            ).unsqueeze(0).expand(bz, -1)
+
+        if summarized_retention_weights is None:
+            retention_weights = retention_weights.view(bz, -1, retention_weights.shape[-1])
+            summarized_retention_weights = retention_sum_packed_triton(retention_weights, doc_mask, 128, 128)
+
+        dtype, device = summarized_retention_weights.dtype, summarized_retention_weights.device
+
+        # hinge loss
+        if self.config.global_capacity:
+            memory_size = self.config.memory_size * self.config.num_hidden_layers * self.config.num_key_value_heads
+            position_ids = position_ids * self.config.num_hidden_layers * self.config.num_key_value_heads
+            summarized_retention_weights = summarized_retention_weights.sum(dim=1)
+            retention_loss = torch.maximum(
+                (summarized_retention_weights - memory_size) / (position_ids - memory_size).clamp(min=1.0),
+                torch.zeros_like(summarized_retention_weights, dtype=dtype, device=device)
+            )
+        else:
+            memory_size = self.config.memory_size
+            retention_loss = torch.maximum(
+                (summarized_retention_weights - memory_size) / (position_ids - memory_size).clamp(min=1.0),
+                torch.zeros_like(summarized_retention_weights, dtype=dtype, device=device)
+            )
+        # get all non_zero retention losses and take the mean
+        if retention_loss.numel() == 0:
+            print("No retention loss to compute, returning 0")
+            # raise ValueError
+            return torch.tensor(0.0, device=device)
+
+        num_non_zero = (retention_loss > 0).sum()
+        retention_loss = retention_loss.sum() / num_non_zero if num_non_zero > 0 else torch.tensor(0.0, device=device)
+        return retention_loss
+
+    def compute_ntp_loss(self, hidden_states: torch.Tensor, labels: Optional[torch.LongTensor] = None, **kwargs: Unpack[TransformersKwargs]) -> Optional[torch.Tensor]:
+        """
+        Computes the NTP loss as described in the Qwen3 paper.
+        """
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        logits = self.lm_head(hidden_states)  # [bs, max_lenth, dim]
+        base_loss = None
+        if labels is not None:
+            base_loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+        return base_loss
+
+    def compute_fwkl_loss(self, hidden_states: torch.Tensor, base_logits: torch.Tensor, labels: Optional[torch.LongTensor] = None, **kwargs: Unpack[TransformersKwargs]) -> torch.Tensor:
+        """
+        Computes the logits distillation loss
+        """
+        logits = self.lm_head(hidden_states)  # [bs, max_lenth, dim]
+        p_t = F.softmax(base_logits, dim=-1)
+        log_p_s = F.log_softmax(logits, dim=-1)
+        mask = (labels != -100).float()
+        kl = F.kl_div(log_p_s, p_t, reduction='none').sum(-1)  # per token
+        distil_loss = (kl * mask).sum() / mask.sum()
+
+        # logits = self.lm_head(hidden_states)  # [bs, max_lenth, dim]
+        # ori_probs = F.softmax(base_logits, dim=-1)
+        # inf_mask = torch.isinf(logits)
+        # logprobs = F.log_softmax(logits, dim=-1)
+        # prod_probs = torch.masked_fill(ori_probs * logprobs, inf_mask, 0) # [bs, max_lenth, dim]
+        # x = torch.sum(prod_probs, dim=-1).view(-1) # [bs * max_lenth]
+        # mask = (labels != -100).int() # [bs, max_lenth], view(-1)->[bs*max_lenth]
+        # distil_loss = -torch.sum(x * mask.view(-1), dim=0) / torch.sum(mask.view(-1), dim=0) # num
+        return distil_loss
+
+    def compute_rvkl_loss(self, hidden_states: torch.Tensor, base_logits: torch.Tensor, labels: Optional[torch.LongTensor] = None, **kwargs: Unpack[TransformersKwargs]) -> torch.Tensor:
+        """
+        Computes the logits distillation loss
+        """
+        logits = self.lm_head(hidden_states)  # [bs, max_lenth, dim]
+        ori_logprobs = F.log_softmax(base_logits, dim=-1)
+        inf_mask = torch.isinf(logits)
+        logprobs = F.log_softmax(logits, dim=-1)
+        probs = logprobs.exp()  # [bs, max_lenth, dim]
+        prod_probs = torch.masked_fill(
+            probs * (logprobs - ori_logprobs), inf_mask, 0
+        )  # [bs, max_lenth, dim]
+        # prod_probs = torch.masked_fill(
+        #     F.kl_div(ori_logprobs, logprobs, log_target=True, reduction='none'), inf_mask, 0
+        # ) # [bs, max_lenth, dim]
+        x = torch.sum(prod_probs, dim=-1).view(-1) # [bs * max_lenth]
+        mask = (labels != -100).int() # [bs, max_lenth], view(-1)->[bs*max_lenth]
+        distil_loss = torch.sum(x * mask.view(-1), dim=0) / torch.sum(mask.view(-1), dim=0) # num
+        return distil_loss
+
+    def compute_base_loss(self, hidden_states: torch.Tensor, labels: Optional[torch.LongTensor] = None, base_logits: Optional[torch.Tensor] = None, **kwargs: Unpack[TransformersKwargs]) -> Optional[torch.Tensor]:
+        """
+        Computes the base loss based on the configuration.
+        """
+        assert labels is not None, "Labels must be provided."
+        base_loss = 0.0
+        n_losses = 0
+        if 'ntp' in self.config.base_loss:
+            base_loss += self.compute_ntp_loss(hidden_states=hidden_states, labels=labels, **kwargs)
+            n_losses += 1
+        if "fwkl" in self.config.base_loss:
+            assert base_logits is not None, "Base logits must be provided for forward logits distillation loss computation."
+            base_loss += self.compute_fwkl_loss(hidden_states=hidden_states, base_logits=base_logits, labels=labels, **kwargs)
+            n_losses += 1
+        if "rvkl" in self.config.base_loss:
+            assert base_logits is not None, "Base logits must be provided for reverse logits distillation loss computation."
+            base_loss += self.compute_rvkl_loss(hidden_states=hidden_states, base_logits=base_logits, labels=labels, **kwargs)
+            n_losses += 1
+
+        base_loss = base_loss / n_losses if n_losses > 0 else None
+        return base_loss
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -841,7 +923,32 @@ class TrimKVQwen3ForCausalLM(TrimKVQwen3PreTrainedModel, GenerationMixin):
 
         base_loss = None
         if self.training and not vanilla_forward:
-            pass
+            if self.config.logit_block_size > 0:
+                assert hidden_states.shape[0] == 1, "Logit block size is only supported for batch size 1."
+                num_valid_labels = (labels != -100).sum().item()
+                hidden_state_blocks = torch.split(hidden_states, self.config.logit_block_size, dim=1)
+                base_logit_blocks = torch.split(base_logits, self.config.logit_block_size, dim=1) if base_logits is not None else [None] * len(hidden_state_blocks)
+                label_blocks = torch.split(labels, self.config.logit_block_size, dim=1) if labels is not None else [None] * len(hidden_state_blocks)
+
+                base_loss = sum(
+                    ((label_block != -100).sum().item() / num_valid_labels) * 
+                    torch.utils.checkpoint.checkpoint(
+                        self.compute_base_loss,
+                        hidden_states=hidden_state_block,
+                        base_logits=base_logit_block,
+                        labels=label_block,
+                        use_reentrant=False,
+                    ) for hidden_state_block, base_logit_block, label_block in zip(
+                        hidden_state_blocks, base_logit_blocks, label_blocks
+                    ) if (label_block != -100).sum().item() > 0
+                )
+            else:
+                base_loss = self.compute_base_loss(
+                    hidden_states=hidden_states,
+                    base_logits=base_logits,
+                    labels=labels,
+                    **kwargs,
+                )
             logits = None
         else:
             slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -850,6 +957,8 @@ class TrimKVQwen3ForCausalLM(TrimKVQwen3PreTrainedModel, GenerationMixin):
 
         retention_weights = outputs.retention_weights
         retention_loss = None
+        if retention_weights is not None and self.training:
+            retention_loss = self.compute_retention_loss(retention_weights, outputs.summarized_retention_weights, position_ids=position_ids)
 
         loss = None
         if base_loss is not None and retention_loss is not None:

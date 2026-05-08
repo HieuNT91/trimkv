@@ -16,13 +16,10 @@ class TrimKVPhi3Config(Phi3Config):
         retention_gate='rg',
         base_loss='fwkl',
         attn_impl='rg_attn_flex',
-        compress_memory=False,
-        compress_strategy='alpha',
-        floor_budget_ratio=0.,
-        buffer_size=1,
         trainable_params=None,
         max_seq_len=20480,
         retention_gate_intermediate_size=1024,
+        tie_retention_gate_layers=True,
         **kwargs,
     ):
         self.retention_gate_bias_init = retention_gate_bias_init
@@ -33,11 +30,8 @@ class TrimKVPhi3Config(Phi3Config):
         self.attn_impl = attn_impl
         self.base_loss = base_loss
         self.trainable_params = trainable_params
-        self.compress_memory = compress_memory
-        self.compress_strategy = compress_strategy
-        self.floor_budget_ratio = floor_budget_ratio
-        self.buffer_size = buffer_size # run compression every `buffer_size` tokens
         self.max_seq_len = max_seq_len
+        tie_retention_gate_layers = tie_retention_gate_layers
         super().__init__(
             **kwargs,
         )
