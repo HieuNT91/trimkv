@@ -47,7 +47,7 @@ DBTrimKV's combination of the global retention gate with `PagedTrimKVCache` lets
 It's fast
 
 <div align="center">
-    <img width="800" alt="teaser" src="https://raw.githubusercontent.com/ngocbh/trimkv/main/assets/speed.png"/>
+    <img width="300" alt="teaser" src="https://raw.githubusercontent.com/ngocbh/trimkv/main/assets/speed.png"/>
 </div>
 
 It's smart
