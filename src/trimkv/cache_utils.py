@@ -1079,7 +1079,6 @@ class PagedTrimKVCache(TrimKVCache):
 
 __all__ = [
     "TrimKVCache",
-    "DynamicBudgetTrimKVCache",
     "PagedTrimKVCache",
 ]
 
