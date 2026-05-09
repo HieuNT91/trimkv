@@ -9,7 +9,6 @@ results_old/
 artifacts/
 data/
 tests/
-scripts/
 .vscode/
 launch.json
 *wrapper*.sh

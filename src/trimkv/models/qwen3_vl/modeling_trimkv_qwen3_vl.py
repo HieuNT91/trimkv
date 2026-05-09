@@ -381,6 +381,14 @@ class TrimKVQwen3VLPreTrainedModel(Qwen3VLPreTrainedModel):
                         print(f"Using existing local artifact at: {pretrained_model_name_or_path}")
                 else:
                     raise ValueError(f"Artifact {pretrained_model_name_or_path} not found in wandb.")
+            elif download_from == 'huggingface':
+                from huggingface_hub import snapshot_download
+                pretrained_model_name_or_path = snapshot_download(pretrained_model_name_or_path)
+                print(f"Downloaded model from HuggingFace to: {pretrained_model_name_or_path}")
+            elif download_from == 'local':
+                print(f"Loading model from local path: {pretrained_model_name_or_path}")
+            else:
+                raise ValueError(f"Unsupported download_from value: {download_from}")
 
             config = TrimKVQwen3VLConfig.from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
             if hasattr(config, "base_model"):
@@ -411,7 +419,7 @@ class TrimKVQwen3VLPreTrainedModel(Qwen3VLPreTrainedModel):
                 model.load_state_dict(gate_weights, strict=False)
                 print("Retention gate weights loaded successfully.")
             else:
-                print("Could not load the trimkv gate weights.")
+                raise ValueError(f"Path {pretrained_model_name_or_path} does not exist.")
         else:
             model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
 
