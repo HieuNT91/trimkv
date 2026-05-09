@@ -1,6 +1,6 @@
 # TrimKV: Token Retention for Memory-Bounded Key-Value Eviction
 
-<a href="https://arxiv.org/abs/2405.14352"><img src="https://img.shields.io/badge/arxiv-2405.14352-red?style=for-the-badge"></a>
+<a href="https://arxiv.org/abs/2512.03324"><img src="https://img.shields.io/badge/arxiv-2512.03324-red?style=for-the-badge"></a>
 
 ## 🚀 Updates
 
